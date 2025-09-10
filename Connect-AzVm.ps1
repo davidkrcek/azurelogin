@@ -1,22 +1,9 @@
-<#
+<# 
 .SYNOPSIS
-  Entra (Azure AD) SSH zu Azure-Linux-VMs mit Client-Auswahl:
-  - MobaXterm (OpenSSH intern) oder
+  Entra (Azure AD) SSH to Azure Linux VMs with client selection:
+  - MobaXterm (OpenSSH) or
   - Windows OpenSSH (ssh.exe).
-  PuTTY wird erkannt, aber NICHT genutzt (fehlende OpenSSH-Zertifikat-Unterstützung).
-
-.PARAMETER InteractiveMenu
-  Menü zur Auswahl von Subscription + VM + Client.
-
-.PARAMETER ResourceGroup / VmName
-  Direkter Verbindungsmodus (ohne Menü).
-
-.PARAMETER Client
-  'moba' | 'winssh'
-  Vorbelegung des SSH-Clients. Fallback automatisch, wenn nicht verfügbar.
-
-.PARAMETER PreferPrivateIp
-  Bevorzugt private IP (VPN/ER), az ssh config --prefer-private-ip.
+  PuTTY is detected but NOT supported for Entra SSH.
 #>
 
 param(
@@ -26,38 +13,38 @@ param(
   [string]$Client = 'auto',
   [switch]$InteractiveMenu,
   [switch]$PreferPrivateIp,
-  [string]$KeysSubFolder = "az_keys"
+  [string]$KeysSubFolder = 'az_keys'
 )
 
-# ========= Pfade & Defaults =========
+# ===== Paths & defaults =====
 $UserName   = $env:USERNAME
 $MobaHome   = "C:\Users\$UserName\Documents\MobaXterm\home"
-$SshFolder  = Join-Path $MobaHome ".ssh"
-$ConfigFile = Join-Path $SshFolder "azure_ssh_config"
+$SshFolder  = Join-Path $MobaHome '.ssh'
+$ConfigFile = Join-Path $SshFolder 'azure_ssh_config'
 $KeysFolder = Join-Path $SshFolder $KeysSubFolder
 
-# ========= Helpers =========
+# ===== Helpers =====
 function Require-AzCli {
   if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-    throw "Azure CLI (az) nicht gefunden. Installiere: https://aka.ms/azure-cli"
+    throw 'Azure CLI (az) not found. Install: https://aka.ms/azure-cli'
   }
 }
 
 function Ensure-AzLogin {
   $acct = az account show --query user.name -o tsv 2>$null
   if (-not $acct) {
-    Write-Host "Kein aktiver Azure-Login – starte 'az login'..." -ForegroundColor Yellow
+    Write-Host "No active Azure login - running 'az login'..." -ForegroundColor Yellow
     az login | Out-Null
     $acct = az account show --query user.name -o tsv 2>$null
-    if (-not $acct) { throw "Azure-Login fehlgeschlagen." }
+    if (-not $acct) { throw 'Azure login failed.' }
   }
-  Write-Host "Angemeldet als: $acct"
+  Write-Host "Signed in as: $acct"
 }
 
 function Ensure-SshExtension {
   az extension show --name ssh -o none 2>$null
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "Installiere Azure CLI SSH-Extension..." -ForegroundColor Yellow
+    Write-Host 'Installing Azure CLI SSH extension...' -ForegroundColor Yellow
     az extension add --name ssh | Out-Null
   }
 }
@@ -69,14 +56,10 @@ function Ensure-Folders {
 }
 
 function Detect-Clients {
-  # MobaXterm eingebauter OpenSSH ist schlicht 'ssh' im Moba-Terminal, aber wir nutzen primär Windows-ssh.exe
-  # Verfügbarkeit prüfen:
   $hasWinSsh = [bool](Get-Command ssh -ErrorAction SilentlyContinue)
-  # Prüfe (optionales) MobaXterm-Verzeichnis:
-  $mobaRoot1 = "C:\Program Files (x86)\Mobatek\MobaXterm"
-  $mobaRoot2 = "C:\Program Files\Mobatek\MobaXterm"
+  $mobaRoot1 = 'C:\Program Files (x86)\Mobatek\MobaXterm'
+  $mobaRoot2 = 'C:\Program Files\Mobatek\MobaXterm'
   $hasMoba   = (Test-Path $mobaRoot1) -or (Test-Path $mobaRoot2) -or (Test-Path $MobaHome)
-  # PuTTY erkennen (nur Hinweis):
   $puttyExe  = (Get-Command putty -ErrorAction SilentlyContinue)
   $plinkExe  = (Get-Command plink -ErrorAction SilentlyContinue)
   $hasPutty  = [bool]($puttyExe -or $plinkExe)
@@ -91,16 +74,16 @@ function Select-FromList {
   param(
     [Parameter(Mandatory)][array]$Items,
     [Parameter(Mandatory)][string]$Title,
-    [string]$DisplayProperty = "name"
+    [string]$DisplayProperty = 'name'
   )
-  Write-Host ""
+  Write-Host ''
   Write-Host "== $Title ==" -ForegroundColor Cyan
   for ($i=0; $i -lt $Items.Count; $i++) {
     $label = if ($DisplayProperty) { $Items[$i].$DisplayProperty } else { $Items[$i] }
     Write-Host ("[{0}] {1}" -f ($i+1), $label)
   }
   do {
-    $sel = Read-Host "Auswahl (1-$($Items.Count))"
+    $sel = Read-Host "Select (1-$($Items.Count))"
     [int]$idx = $sel - 1
   } until ($idx -ge 0 -and $idx -lt $Items.Count)
   return $Items[$idx]
@@ -108,37 +91,37 @@ function Select-FromList {
 
 function Pick-Client([object]$det) {
   $choices = @()
-  if ($det.HasMoba)   { $choices += [pscustomobject]@{ name="MobaXterm (OpenSSH)"; val="moba" } }
-  if ($det.HasWinSsh) { $choices += [pscustomobject]@{ name="Windows OpenSSH (ssh.exe)"; val="winssh" } }
-  if ($det.HasPutty)  { $choices += [pscustomobject]@{ name="PuTTY (NICHT kompatibel mit Entra-SSH)"; val="putty" } }
+  if ($det.HasMoba)   { $choices += [pscustomobject]@{ name='MobaXterm (OpenSSH)'; val='moba' } }
+  if ($det.HasWinSsh) { $choices += [pscustomobject]@{ name='Windows OpenSSH (ssh.exe)'; val='winssh' } }
+  if ($det.HasPutty)  { $choices += [pscustomobject]@{ name='PuTTY (not compatible with Entra SSH)'; val='putty' } }
 
   if ($choices.Count -eq 0) {
-    throw "Kein unterstützter SSH-Client gefunden. Installiere MobaXterm oder aktiviere Windows OpenSSH."
+    throw 'No supported SSH client found. Install MobaXterm or enable Windows OpenSSH.'
   }
 
-  $pick = Select-FromList -Items $choices -Title "SSH-Client wählen" -DisplayProperty "name"
+  $pick = Select-FromList -Items $choices -Title 'Select SSH client' -DisplayProperty 'name'
   if ($pick.val -eq 'putty') {
-    throw "PuTTY unterstützt OpenSSH-Zertifikate nicht. Bitte MobaXterm oder Windows OpenSSH verwenden."
+    throw 'PuTTY does not support OpenSSH certs (id_*-cert.pub). Use MobaXterm or Windows OpenSSH.'
   }
   return $pick.val
 }
 
 function Pick-Subscription {
   $subs = az account list -o json | ConvertFrom-Json
-  if (-not $subs) { throw "Keine Subscriptions gefunden." }
-  $pick = Select-FromList -Items $subs -Title "Subscription wählen" -DisplayProperty "name"
+  if (-not $subs) { throw 'No subscriptions found.' }
+  $pick = Select-FromList -Items $subs -Title 'Select subscription' -DisplayProperty 'name'
   az account set --subscription $pick.id | Out-Null
-  Write-Host "Subscription gesetzt: $($pick.name) ($($pick.id))" -ForegroundColor Green
+  Write-Host "Subscription set: $($pick.name) ($($pick.id))" -ForegroundColor Green
   return $pick
 }
 
 function Pick-Vm {
   $vms = az vm list -d -o json | ConvertFrom-Json
-  if (-not $vms) { throw "Keine VMs in dieser Subscription sichtbar." }
+  if (-not $vms) { throw 'No VMs visible in this subscription.' }
 
   $rgs = $vms | Select-Object -ExpandProperty resourceGroup -Unique | Sort-Object
   $rgChoice = if ($rgs.Count -gt 1) {
-    Select-FromList -Items $rgs -Title "Resource Group wählen" -DisplayProperty $null
+    Select-FromList -Items $rgs -Title 'Select Resource Group' -DisplayProperty $null
   } else { $rgs[0] }
 
   $vmsInRg = $vms | Where-Object { $_.resourceGroup -eq $rgChoice } |
@@ -154,7 +137,7 @@ function Pick-Vm {
       }
     }
 
-  Select-FromList -Items $vmsInRg -Title "VM wählen (RG: $rgChoice)" -DisplayProperty "name"
+  Select-FromList -Items $vmsInRg -Title "Select VM (RG: $rgChoice)" -DisplayProperty 'name'
 }
 
 function Build-SshConfig {
@@ -164,32 +147,32 @@ function Build-SshConfig {
     [switch]$PreferPrivate
   )
   $args = @(
-    "--file", $ConfigFile,
-    "-n", $VM,
-    "-g", $RG,
-    "--keys-destination-folder", $KeysFolder,
-    "--overwrite"
+    '--file', $ConfigFile,
+    '-n', $VM,
+    '-g', $RG,
+    '--keys-destination-folder', $KeysFolder,
+    '--overwrite'
   )
-  if ($PreferPrivate) { $args += "--prefer-private-ip" }
+  if ($PreferPrivate) { $args += '--prefer-private-ip' }
 
-  Write-Host "Erzeuge SSH-Config für $RG/$VM ..." -ForegroundColor Cyan
+  Write-Host "Generating SSH config for $RG/$VM ..." -ForegroundColor Cyan
   az ssh config @args | Out-Null
 
-  $Alias = Select-String -Path $ConfigFile -Pattern "^Host\s+" |
+  $Alias = Select-String -Path $ConfigFile -Pattern '^Host\s+' |
     Select-Object -First 1 |
-    ForEach-Object { ($_.Line -split "\s+")[1] }
+    ForEach-Object { ($_.Line -split '\s+')[1] }
 
-  if (-not $Alias) { throw "Konnte Host-Alias aus $ConfigFile nicht ermitteln." }
+  if (-not $Alias) { throw "Could not determine host alias from $ConfigFile." }
   return $Alias
 }
 
 function Connect-OpenSsh {
-  param([Parameter(Mandatory)] [string]$Alias)
-  Write-Host "Verbinde via OpenSSH mit '$Alias' ..." -ForegroundColor Green
+  param([Parameter(Mandatory)][string]$Alias)
+  Write-Host "Connecting via OpenSSH to '$Alias' ..." -ForegroundColor Green
   ssh -F $ConfigFile $Alias
 }
 
-# ========== Ablauf ==========
+# ===== Flow =====
 try {
   Require-AzCli
   Ensure-AzLogin
@@ -208,31 +191,30 @@ try {
       $Client = Pick-Client -det $det
     }
   } else {
-    if (-not $ResourceGroup) { $ResourceGroup = Read-Host "Bitte ResourceGroup eingeben" }
-    if (-not $VmName)        { $VmName        = Read-Host "Bitte VM-Namen eingeben" }
+    if (-not $ResourceGroup) { $ResourceGroup = Read-Host 'Enter Resource Group' }
+    if (-not $VmName)        { $VmName        = Read-Host 'Enter VM name' }
     if ($Client -eq 'auto') {
-      # automatische Priorität: Moba (wenn vorhanden) -> Windows OpenSSH
-      if ($det.HasMoba) { $Client = 'moba' }
+      if     ($det.HasMoba)   { $Client = 'moba' }
       elseif ($det.HasWinSsh) { $Client = 'winssh' }
-      elseif ($det.HasPutty) { throw "PuTTY erkannt, aber nicht kompatibel mit Entra-SSH. Bitte OpenSSH verwenden." }
-      else { throw "Kein SSH-Client gefunden." }
+      elseif ($det.HasPutty)  { throw 'PuTTY detected, but not compatible with Entra SSH. Use OpenSSH.' }
+      else                    { throw 'No SSH client found.' }
     }
   }
 
-  # SSH-Config + Keys (werden von az ssh config generiert)
+  # Generate SSH config and keys via az ssh config
   $alias = Build-SshConfig -RG $ResourceGroup -VM $VmName -PreferPrivate:$PreferPrivateIp
 
   switch ($Client) {
-    'moba'   { Connect-OpenSsh -Alias $alias } # im Moba-Terminal genauso nutzbar
+    'moba'   { Connect-OpenSsh -Alias $alias }
     'winssh' { Connect-OpenSsh -Alias $alias }
-    default  { throw "Unerwarteter Client: $Client" }
+    default  { throw "Unexpected client: $Client" }
   }
 
 } catch {
-  Write-Host "FEHLER: $($_.Exception.Message)" -ForegroundColor Red
-  if ($_.Exception.Message -match "PuTTY") {
-    Write-Host "Hinweis: Entra-SSH nutzt OpenSSH-Zertifikate (id_*-cert.pub). PuTTY/plink unterstützen das nicht." -ForegroundColor Yellow
-    Write-Host "Verwende bitte MobaXterm (OpenSSH) oder Windows-OpenSSH (ssh.exe)." -ForegroundColor Yellow
+  Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+  if ($_.Exception.Message -match 'PuTTY') {
+    Write-Host 'Note: Entra SSH uses OpenSSH certificates (id_*-cert.pub). PuTTY/plink do not support those.' -ForegroundColor Yellow
+    Write-Host 'Use MobaXterm (OpenSSH) or Windows OpenSSH (ssh.exe).' -ForegroundColor Yellow
   }
   exit 1
 }
